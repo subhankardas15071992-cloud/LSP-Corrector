@@ -167,28 +167,29 @@ jobs:
           cd lsp
           make VERBOSE=1
 
-      - name: Package
+      - name: Package (official targets)
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/windows-x64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          echo "=== Looking for plugin binaries ==="
-          find .build -type f \( -name "*.dll" -o -name "*.exe" \) | head -30
+          # Use the project's own packaging targets
+          make package || make bundle || true
+          make install DESTDIR="${ARTIFACT_DIR}/install" || true
 
-          find .build -type f \( \
-              -name "lsp-plugins-vst2.dll" -o \
-              -name "lsp-plugins-vst3.dll" -o \
-              -name "lsp-plugins-clap.dll" -o \
-              -name "*.dll" \
-            \) -exec cp -v {} "$ARTIFACT_DIR/" \;
+          # Collect everything useful
+          find .build -type f \( -name "*.dll" -o -name "*.exe" \) -exec cp -v {} "$ARTIFACT_DIR/" \;
+          find "${ARTIFACT_DIR}/install" -type f \( -name "*.dll" -o -name "*.exe" \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
 
-          find .build -type f -name "*.exe" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          # Also keep any .vst3 / .clap directories if they appeared
+          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" \) 2>/dev/null | while read d; do
+            cp -a "$d" "$ARTIFACT_DIR/"
+          done
 
           echo "=== Final artifact contents ==="
-          ls -la "$ARTIFACT_DIR" || true
-          find "$ARTIFACT_DIR" | head -40
+          ls -la "$ARTIFACT_DIR"
+          find "$ARTIFACT_DIR" | head -50
 
       - uses: actions/upload-artifact@v4
         with:
@@ -221,28 +222,30 @@ jobs:
           cd lsp
           gmake VERBOSE=1
 
-      - name: Package
+      - name: Package (official targets)
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-arm64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          echo "=== Looking for plugin bundles / dylibs ==="
-          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) || true
-          find .build -type f \( -name "*.dylib" -o -name "*.so" \) | head -20
+          # Official packaging
+          gmake package || gmake bundle || true
+          gmake install DESTDIR="${ARTIFACT_DIR}/install" || true
 
-          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
-            echo "Copying bundle $d"
+          # Collect bundles (preferred)
+          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+            echo "Copying bundle: $d"
             cp -a "$d" "$ARTIFACT_DIR/"
           done
 
+          # Fallback: the raw dylibs
           find .build -type f \( -name "*vst3*.dylib" -o -name "*clap*.dylib" -o -name "*vst2*.dylib" \) \
             -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
 
           echo "=== Final artifact contents ==="
-          ls -la "$ARTIFACT_DIR" || true
-          find "$ARTIFACT_DIR" | head -40
+          ls -la "$ARTIFACT_DIR"
+          find "$ARTIFACT_DIR" | head -50
 
       - uses: actions/upload-artifact@v4
         with:
@@ -251,7 +254,7 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # macOS x86_64 (Intel) – more powerful runner
+  # macOS x86_64 (Intel)
   # --------------------------------------------------------------------------
   macos-x64:
     runs-on: macos-26-intel
@@ -287,15 +290,18 @@ jobs:
           export CXXFLAGS="$CFLAGS"
           gmake VERBOSE=1
 
-      - name: Package
+      - name: Package (official targets)
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-x64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
-            echo "Copying bundle $d"
+          gmake package || gmake bundle || true
+          gmake install DESTDIR="${ARTIFACT_DIR}/install" || true
+
+          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+            echo "Copying bundle: $d"
             cp -a "$d" "$ARTIFACT_DIR/"
           done
 
@@ -303,8 +309,8 @@ jobs:
             -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
 
           echo "=== Final artifact contents ==="
-          ls -la "$ARTIFACT_DIR" || true
-          find "$ARTIFACT_DIR" | head -40
+          ls -la "$ARTIFACT_DIR"
+          find "$ARTIFACT_DIR" | head -50
 
       - uses: actions/upload-artifact@v4
         with:
