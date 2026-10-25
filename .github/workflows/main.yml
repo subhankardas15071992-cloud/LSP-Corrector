@@ -8,9 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  # Plugin formats we care about for Windows / macOS
   FEATURES: "ui vst2 vst3 clap"
-  # Make the build a bit quieter but still informative
   MAKEFLAGS: "-j4"
 
 jobs:
@@ -21,19 +19,20 @@ jobs:
     runs-on: windows-latest
     defaults:
       run:
-        shell: bash
+        shell: msys2 {0}
 
     steps:
       - name: Checkout this repository
         uses: actions/checkout@v4
 
-      - name: Install MSYS2 + toolchain
+      - name: Install MSYS2 + toolchain + patch
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
           install: >-
-            git make mingw-w64-ucrt-x86_64-gcc
+            git make patch
+            mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkg-config
             mingw-w64-ucrt-x86_64-cairo
             mingw-w64-ucrt-x86_64-freetype
@@ -43,7 +42,6 @@ jobs:
             mingw-w64-ucrt-x86_64-python
 
       - name: Fetch official LSP sources
-        shell: msys2 {0}
         run: |
           git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
           cd lsp
@@ -51,13 +49,13 @@ jobs:
           make fetch
 
       - name: Apply HiDPI / DPI-awareness patch
-        shell: msys2 {0}
         run: |
           cd lsp
-          cat > /tmp/lsp-hidpi.patch << 'PATCH'
+
+          cat > /tmp/lsp-hidpi.patch << 'EOF'
           --- a/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
           +++ b/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
-          @@ -43,6 +43,28 @@
+          @@ -43,6 +43,29 @@
                        constexpr FLOAT DEFAULT_DESKTOP_DPI     = 96.0f;
            
           +            static FLOAT get_window_dpi(HWND hwnd)
@@ -82,7 +80,7 @@ jobs:
                        //----------------------------------------------------------------------
                        // Construction
                        //----------------------------------------------------------------------
-          @@ -182,8 +204,10 @@
+          @@ -182,8 +205,10 @@
                                prop.type                   = D2D1_RENDER_TARGET_TYPE_DEFAULT;
                                prop.pixelFormat.format     = DXGI_FORMAT_B8G8R8A8_UNORM;
                                prop.pixelFormat.alphaMode  = D2D1_ALPHA_MODE_PREMULTIPLIED;
@@ -96,7 +94,7 @@ jobs:
            
           --- a/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
           +++ b/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
-          @@ -40,6 +40,35 @@
+          @@ -40,6 +40,36 @@
            #include <lsp-plug.in/stdlib/string.h>
            #include <lsp-plug.in/common/debug.h>
            
@@ -123,7 +121,7 @@ jobs:
           +                    }
           +                }
           +
-          +                // Fallback to older API
+          +                // Fallback
           +                HMODULE shcore = ::LoadLibraryW(L"Shcore.dll");
           +                if (shcore)
           +                {
@@ -140,7 +138,7 @@ jobs:
            
            //----------------------------------------------------------------------
            // WinDisplay implementation
-          @@ -70,6 +99,8 @@
+          @@ -70,6 +100,8 @@
                        //----------------------------------------------------------------------
                        status_t WinDisplay::init(int version, const char *display)
                        {
@@ -149,32 +147,46 @@ jobs:
                            // Already initialized?
                            if (bInitialized)
                                return STATUS_OK;
-          PATCH
+          EOF
 
-          # The modules live under .build after "make fetch"
-          patch -p1 -d .build < /tmp/lsp-hidpi.patch || {
-            echo "Trying alternative path..."
-            find .build -type d -name "lsp-ws-lib" | head -1 | while read d; do
-              patch -p1 -d "$d/../.." < /tmp/lsp-hidpi.patch || true
-            done
-          }
+          echo "Applying patch..."
+          if patch -p1 --dry-run < /tmp/lsp-hidpi.patch > /dev/null 2>&1; then
+            patch -p1 < /tmp/lsp-hidpi.patch
+            echo "Patch applied successfully"
+          else
+            echo "Direct patch failed, trying to locate files..."
+            WS_LIB=$(find modules -type d -name "lsp-ws-lib" | head -1)
+            if [ -n "$WS_LIB" ]; then
+              echo "Found lsp-ws-lib at $WS_LIB"
+              # Apply with correct strip level relative to modules/
+              (cd modules && patch -p1 < /tmp/lsp-hidpi.patch) || {
+                # Last resort: manual sed-style replacement for the critical lines
+                echo "Falling back to sed replacements"
+                find modules/lsp-ws-lib -name "WinDDSurface.cpp" -exec sed -i \
+                  -e 's/prop\.dpiX\s*=\s*DEFAULT_DESKTOP_DPI;/const FLOAT dpi = get_window_dpi(pShared->hWindow); prop.dpiX = dpi;/' \
+                  -e 's/prop\.dpiY\s*=\s*DEFAULT_DESKTOP_DPI;/prop.dpiY = dpi;/' {} \;
+              }
+            else
+              echo "ERROR: could not find lsp-ws-lib"
+              ls -la modules || true
+              exit 1
+            fi
+          fi
 
       - name: Build
-        shell: msys2 {0}
         run: |
           cd lsp
           make VERBOSE=1
 
       - name: Package artifacts
-        shell: msys2 {0}
         run: |
           cd lsp
           mkdir -p ../artifacts/windows-x64
-          # Collect the usual plugin locations
-          find .build -type f \( -name "*.dll" -o -name "*.vst3" -o -name "*.clap" \) \
-            -exec cp --parents {} ../artifacts/windows-x64/ \; || true
-          # Also grab any installable packages if the Makefile produced them
-          find . -maxdepth 3 -type d -name "bin" -o -name "lib" | head -5
+          find .build modules -type f \( -name "*.dll" -o -name "*.vst3" -o -name "*.clap" \) \
+            2>/dev/null | while read f; do
+              cp --parents "$f" ../artifacts/windows-x64/ 2>/dev/null || cp "$f" ../artifacts/windows-x64/
+            done || true
+          find . -maxdepth 4 -type d \( -name "bin" -o -name "lib" -o -name "vst3" \) 2>/dev/null | head -10
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -204,27 +216,21 @@ jobs:
           gmake config FEATURES="${{ env.FEATURES }}"
           gmake fetch
 
-      - name: Apply macOS content-scale hardening
+      - name: Apply macOS scale hardening (optional safety)
         run: |
           cd lsp
-          # Small extra safety for the already-present display_pixel_scale() logic
-          # and ensure Cairo surfaces respect backingScaleFactor more reliably.
-          cat > /tmp/macos-scale.patch << 'PATCH'
-          --- a/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
-          +++ b/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
-          @@ -820,6 +820,8 @@
-                   static double display_pixel_scale()
-                   {
-                       // On macOS hosts report the factor in PHYSICAL pixels per point —
-          +            // Keep the existing conversion that turns a host-supplied physical
-          +            // scale into a logical zoom factor (the lltwist fix).
-                       #if defined(PLATFORM_MACOSX)
-                           CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-                           if (mode == NULL)
-          PATCH
-          # Apply only if the file exists (it does after fetch)
-          find .build -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" \
-            -exec patch -p1 -N {} < /tmp/macos-scale.patch \; || true
+          # The official code already contains the lltwist display_pixel_scale() fix.
+          # We only add a small comment + ensure the function is present.
+          UI_WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
+          if [ -n "$UI_WRAPPER" ]; then
+            echo "Found ui_wrapper.h at $UI_WRAPPER"
+            # Nothing critical to change; the existing conversion is already correct.
+            # Just touch the file so the build system notices it if needed.
+            touch "$UI_WRAPPER"
+          else
+            echo "ui_wrapper.h not found (will rely on upstream fix)"
+            find modules -name "ui_wrapper.h" || true
+          fi
 
       - name: Build
         run: |
@@ -235,8 +241,10 @@ jobs:
         run: |
           cd lsp
           mkdir -p ../artifacts/macos-arm64
-          find .build -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
-            -exec cp --parents {} ../artifacts/macos-arm64/ \; || true
+          find .build modules -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
+            2>/dev/null | while read f; do
+              cp --parents "$f" ../artifacts/macos-arm64/ 2>/dev/null || cp "$f" ../artifacts/macos-arm64/
+            done || true
 
       - name: Upload macOS arm64 artifacts
         uses: actions/upload-artifact@v4
@@ -266,24 +274,17 @@ jobs:
           gmake config FEATURES="${{ env.FEATURES }}"
           gmake fetch
 
-      - name: Apply macOS content-scale hardening
+      - name: Apply macOS scale hardening (optional safety)
         run: |
           cd lsp
-          cat > /tmp/macos-scale.patch << 'PATCH'
-          --- a/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
-          +++ b/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
-          @@ -820,6 +820,8 @@
-                   static double display_pixel_scale()
-                   {
-                       // On macOS hosts report the factor in PHYSICAL pixels per point —
-          +            // Keep the existing conversion that turns a host-supplied physical
-          +            // scale into a logical zoom factor (the lltwist fix).
-                       #if defined(PLATFORM_MACOSX)
-                           CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-                           if (mode == NULL)
-          PATCH
-          find .build -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" \
-            -exec patch -p1 -N {} < /tmp/macos-scale.patch \; || true
+          UI_WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
+          if [ -n "$UI_WRAPPER" ]; then
+            echo "Found ui_wrapper.h at $UI_WRAPPER"
+            touch "$UI_WRAPPER"
+          else
+            echo "ui_wrapper.h not found (will rely on upstream fix)"
+            find modules -name "ui_wrapper.h" || true
+          fi
 
       - name: Build
         run: |
@@ -294,8 +295,10 @@ jobs:
         run: |
           cd lsp
           mkdir -p ../artifacts/macos-x64
-          find .build -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
-            -exec cp --parents {} ../artifacts/macos-x64/ \; || true
+          find .build modules -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
+            2>/dev/null | while read f; do
+              cp --parents "$f" ../artifacts/macos-x64/ 2>/dev/null || cp "$f" ../artifacts/macos-x64/
+            done || true
 
       - name: Upload macOS x64 artifacts
         uses: actions/upload-artifact@v4
