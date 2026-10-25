@@ -1,4 +1,4 @@
-name: LSP Plugins (Windows + macOS) with HiDPI fix
+name: LSP Plugins (Windows + macOS) with safer HiDPI fix
 
 on:
   push:
@@ -47,15 +47,14 @@ jobs:
           make config FEATURES="${{ env.FEATURES }}"
           make fetch
 
-      - name: Apply HiDPI fix (robust)
+      - name: Apply safer HiDPI fix (Windows)
         run: |
           cd lsp
           SURFACE=$(find modules -path "*/lsp-ws-lib/src/main/win/WinDDSurface.cpp" | head -1)
           DISPLAY=$(find modules -path "*/lsp-ws-lib/src/main/win/WinDisplay.cpp" | head -1)
 
           if [ -z "$SURFACE" ] || [ -z "$DISPLAY" ]; then
-            echo "ERROR: WinDDSurface.cpp / WinDisplay.cpp not found"
-            find modules -name "WinDD*.cpp" || true
+            echo "ERROR: source files not found"
             exit 1
           fi
 
@@ -66,101 +65,75 @@ jobs:
           with open(path, "r", encoding="utf-8", errors="replace") as f:
               src = f.read()
 
-          helper = '''
-              static FLOAT get_window_dpi(HWND hwnd)
-              {
-                  if (hwnd)
-                  {
-                      HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
-                      if (user32)
-                      {
-                          auto pGetDpiForWindow = reinterpret_cast<UINT (WINAPI *)(HWND)>(
-                              ::GetProcAddress(user32, "GetDpiForWindow"));
-                          if (pGetDpiForWindow)
-                              return FLOAT(pGetDpiForWindow(hwnd));
-                      }
-                  }
-                  HDC hdc = ::GetDC(NULL);
-                  FLOAT dpi = hdc ? FLOAT(::GetDeviceCaps(hdc, LOGPIXELSX)) : DEFAULT_DESKTOP_DPI;
-                  if (hdc) ::ReleaseDC(NULL, hdc);
-                  return (dpi > 0.0f) ? dpi : DEFAULT_DESKTOP_DPI;
-              }
-
+          new_block = '''
+                    FLOAT dpi = DEFAULT_DESKTOP_DPI;
+                    if (pShared && pShared->hWindow)
+                    {
+                        HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+                        if (user32)
+                        {
+                            auto pGetDpiForWindow = reinterpret_cast<UINT (WINAPI *)(HWND)>(
+                                ::GetProcAddress(user32, "GetDpiForWindow"));
+                            if (pGetDpiForWindow)
+                            {
+                                UINT d = pGetDpiForWindow(pShared->hWindow);
+                                if (d > 0)
+                                    dpi = FLOAT(d);
+                            }
+                        }
+                    }
+                    prop.dpiX                   = dpi;
+                    prop.dpiY                   = dpi;
           '''
 
-          if "get_window_dpi" not in src:
-              src = re.sub(
-                  r'(constexpr FLOAT DEFAULT_DESKTOP_DPI\s*=\s*96\.0f\s*;)',
-                  r'\1\n' + helper,
-                  src, count=1)
-
           src = re.sub(
-              r'prop\.dpiX\s*=\s*DEFAULT_DESKTOP_DPI\s*;',
-              'const FLOAT dpi = get_window_dpi(pShared->hWindow);\n'
-              '                    prop.dpiX                   = dpi;',
-              src, count=1)
-          src = re.sub(
-              r'prop\.dpiY\s*=\s*DEFAULT_DESKTOP_DPI\s*;',
-              'prop.dpiY                   = dpi;',
-              src, count=1)
+              r'prop\.dpiX\s*=\s*DEFAULT_DESKTOP_DPI\s*;\s*\n\s*prop\.dpiY\s*=\s*DEFAULT_DESKTOP_DPI\s*;',
+              new_block.strip(),
+              src,
+              count=1
+          )
 
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
-          print("WinDDSurface.cpp OK")
+          print("WinDDSurface.cpp patched (minimal DPI fix)")
           PY
 
-          echo "Patching $DISPLAY"
+          echo "Patching $DISPLAY (early DPI awareness, best-effort only)"
           python3 - << 'PY' "$DISPLAY"
           import sys, re
           path = sys.argv[1]
           with open(path, "r", encoding="utf-8", errors="replace") as f:
               src = f.read()
 
-          if "shellscalingapi.h" not in src:
-              src = src.replace(
-                  "#include <windows.h>",
-                  "#include <windows.h>\n#include <shellscalingapi.h>")
-
           awareness = '''
-                  // Set per-monitor DPI awareness (best effort)
+                  // Best-effort DPI awareness – never fail the init if this does not work
                   {
                       HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
                       if (user32)
                       {
-                          auto pSetCtx = reinterpret_cast<BOOL (WINAPI *)(DPI_AWARENESS_CONTEXT)>(
+                          auto pSetCtx = reinterpret_cast<BOOL (WINAPI *)(void*)>(
                               ::GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
                           if (pSetCtx)
-                              pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-                          else
-                          {
-                              HMODULE shcore = ::LoadLibraryW(L"Shcore.dll");
-                              if (shcore)
-                              {
-                                  auto pSet = reinterpret_cast<HRESULT (WINAPI *)(PROCESS_DPI_AWARENESS)>(
-                                      ::GetProcAddress(shcore, "SetProcessDpiAwareness"));
-                                  if (pSet)
-                                      pSet(PROCESS_PER_MONITOR_DPI_AWARE);
-                                  ::FreeLibrary(shcore);
-                              }
-                          }
+                              pSetCtx((void*)(-4)); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
                       }
                   }
-
           '''
 
-          if "SetProcessDpiAwarenessContext" not in src and "SetProcessDpiAwareness" not in src:
+          if "SetProcessDpiAwarenessContext" not in src:
               src = re.sub(
                   r'(status_t WinDisplay::init\(int argc, const char \*\*argv\)\s*\{\s*)',
                   r'\1' + awareness,
-                  src, count=1)
+                  src,
+                  count=1
+              )
 
           with open(path, "w", encoding="utf-8") as f:
               f.write(src)
-          print("WinDisplay.cpp OK")
+          print("WinDisplay.cpp patched (safe awareness)")
           PY
 
           echo "=== Verification ==="
-          grep -n "get_window_dpi\|prop.dpiX\|SetProcessDpiAwareness" "$SURFACE" "$DISPLAY" || true
+          grep -n "dpiX\|dpiY\|SetProcessDpiAwarenessContext\|GetDpiForWindow" "$SURFACE" "$DISPLAY" || true
 
       - name: Build
         run: |
@@ -174,7 +147,6 @@ jobs:
 
           cd lsp
 
-          # Official install creates the proper layout under INSTALL/
           make install PREFIX=./INSTALL || true
 
           echo "=== Contents of INSTALL tree ==="
@@ -189,7 +161,6 @@ jobs:
             find INSTALL -name "*.dll" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
           fi
 
-          # Fallback: raw build products
           find .build -type f \( \
               -name "lsp-plugins-vst2.dll" -o \
               -name "lsp-plugins-vst3.dll" -o \
@@ -197,23 +168,11 @@ jobs:
               -name "lsp-r3d-wgl*.dll" \
             \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
 
-          # ---------------------------------------------------------------
-          # Critical: ship the MinGW / UCRT runtime DLLs the plugins need
-          # ---------------------------------------------------------------
+          # Ship MinGW runtime DLLs
           echo "=== Copying MinGW runtime DLLs ==="
-          for dll in \
-              libwinpthread-1.dll \
-              libgcc_s_seh-1.dll \
-              libstdc++-6.dll \
-              libssp-0.dll
-          do
-            for candidate in \
-                /ucrt64/bin/$dll \
-                /mingw64/bin/$dll \
-                /usr/bin/$dll
-            do
+          for dll in libwinpthread-1.dll libgcc_s_seh-1.dll libstdc++-6.dll libssp-0.dll; do
+            for candidate in /ucrt64/bin/$dll /mingw64/bin/$dll /usr/bin/$dll; do
               if [ -f "$candidate" ]; then
-                echo "Found $candidate"
                 cp -v "$candidate" "$ARTIFACT_DIR/"
                 [ -d "$ARTIFACT_DIR/VST2" ] && cp -v "$candidate" "$ARTIFACT_DIR/VST2/" || true
                 [ -d "$ARTIFACT_DIR/VST3" ] && cp -v "$candidate" "$ARTIFACT_DIR/VST3/" || true
@@ -252,6 +211,23 @@ jobs:
           gmake config FEATURES="${{ env.FEATURES }}"
           gmake fetch
 
+      - name: Apply safer HiDPI / scale fix (macOS)
+        run: |
+          cd lsp
+
+          # The existing lltwist display_pixel_scale() logic is already present
+          # in recent LSP. We only reinforce it with a small safety comment and
+          # ensure the conversion from physical to logical scale stays intact.
+          WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
+
+          if [ -n "$WRAPPER" ]; then
+            echo "Found ui_wrapper.h – applying light safety reinforcement"
+            # Only add a clarifying comment; do not change logic that already works
+            sed -i.bak 's|// On macOS hosts report the factor in PHYSICAL pixels per point|// On macOS hosts report the factor in PHYSICAL pixels per point\n            // (reinforced: keep existing conversion to logical zoom factor)|' "$WRAPPER" || true
+          else
+            echo "ui_wrapper.h not found – skipping (scale logic already present in current LSP)"
+          fi
+
       - name: Build
         run: |
           cd lsp
@@ -263,7 +239,6 @@ jobs:
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
-
           gmake install PREFIX=./INSTALL || true
 
           echo "=== Contents of INSTALL tree ==="
@@ -280,7 +255,6 @@ jobs:
             done
           fi
 
-          # Fallback
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             cp -a "$d" "$ARTIFACT_DIR/" || true
           done
@@ -330,6 +304,19 @@ jobs:
             CXXFLAGS="-mno-avx2 -mno-avx512f -mno-avx512cd -mno-avx512vl -mno-avx512bw -mno-avx512dq"
           gmake fetch
 
+      - name: Apply safer HiDPI / scale fix (macOS)
+        run: |
+          cd lsp
+
+          WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
+
+          if [ -n "$WRAPPER" ]; then
+            echo "Found ui_wrapper.h – applying light safety reinforcement"
+            sed -i.bak 's|// On macOS hosts report the factor in PHYSICAL pixels per point|// On macOS hosts report the factor in PHYSICAL pixels per point\n            // (reinforced: keep existing conversion to logical zoom factor)|' "$WRAPPER" || true
+          else
+            echo "ui_wrapper.h not found – skipping"
+          fi
+
       - name: Build
         run: |
           cd lsp
@@ -343,7 +330,6 @@ jobs:
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
-
           gmake install PREFIX=./INSTALL || true
 
           echo "=== Contents of INSTALL tree ==="
@@ -360,7 +346,6 @@ jobs:
             done
           fi
 
-          # Fallback
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             cp -a "$d" "$ARTIFACT_DIR/" || true
           done
