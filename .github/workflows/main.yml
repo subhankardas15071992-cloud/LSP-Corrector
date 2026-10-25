@@ -167,29 +167,40 @@ jobs:
           cd lsp
           make VERBOSE=1
 
-      - name: Package (official targets)
+      - name: Package
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/windows-x64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          # Use the project's own packaging targets
-          make package || make bundle || true
-          make install DESTDIR="${ARTIFACT_DIR}/install" || true
+          echo "=== Collecting built binaries ==="
 
-          # Collect everything useful
-          find .build -type f \( -name "*.dll" -o -name "*.exe" \) -exec cp -v {} "$ARTIFACT_DIR/" \;
-          find "${ARTIFACT_DIR}/install" -type f \( -name "*.dll" -o -name "*.exe" \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          # Main plugin DLLs (these are the actual plugins on Windows)
+          find .build -type f \( \
+              -name "lsp-plugins-vst2.dll" -o \
+              -name "lsp-plugins-vst3.dll" -o \
+              -name "lsp-plugins-clap.dll" -o \
+              -name "lsp-plugins.dll" \
+            \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
 
-          # Also keep any .vst3 / .clap directories if they appeared
-          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" \) 2>/dev/null | while read d; do
-            cp -a "$d" "$ARTIFACT_DIR/"
-          done
+          # Any other useful DLLs / tools
+          find .build -type f \( -name "*.dll" -o -name "*.exe" \) \
+            -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          # Try official packaging (non-fatal)
+          make package || true
+          make install DESTDIR="${ARTIFACT_DIR}/install-tmp" || true
+
+          if [ -d "${ARTIFACT_DIR}/install-tmp" ]; then
+            find "${ARTIFACT_DIR}/install-tmp" -type f \( -name "*.dll" -o -name "*.exe" \) \
+              -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+            rm -rf "${ARTIFACT_DIR}/install-tmp"
+          fi
 
           echo "=== Final artifact contents ==="
           ls -la "$ARTIFACT_DIR"
-          find "$ARTIFACT_DIR" | head -50
+          find "$ARTIFACT_DIR" -type f | sort
 
       - uses: actions/upload-artifact@v4
         with:
@@ -222,30 +233,45 @@ jobs:
           cd lsp
           gmake VERBOSE=1
 
-      - name: Package (official targets)
+      - name: Package
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-arm64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          # Official packaging
-          gmake package || gmake bundle || true
-          gmake install DESTDIR="${ARTIFACT_DIR}/install" || true
+          echo "=== Collecting built binaries / bundles ==="
 
-          # Collect bundles (preferred)
-          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+          # Prefer real bundles
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             echo "Copying bundle: $d"
-            cp -a "$d" "$ARTIFACT_DIR/"
+            cp -a "$d" "$ARTIFACT_DIR/" || true
           done
 
           # Fallback: the raw dylibs
-          find .build -type f \( -name "*vst3*.dylib" -o -name "*clap*.dylib" -o -name "*vst2*.dylib" \) \
-            -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          find .build -type f \( \
+              -name "*vst3*.dylib" -o \
+              -name "*clap*.dylib" -o \
+              -name "*vst2*.dylib" -o \
+              -name "lsp-plugins*.dylib" \
+            \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          # Try official packaging (non-fatal)
+          gmake package || true
+          gmake install DESTDIR="${ARTIFACT_DIR}/install-tmp" || true
+
+          if [ -d "${ARTIFACT_DIR}/install-tmp" ]; then
+            find "${ARTIFACT_DIR}/install-tmp" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+              cp -a "$d" "$ARTIFACT_DIR/" || true
+            done
+            find "${ARTIFACT_DIR}/install-tmp" -type f -name "*.dylib" \
+              -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+            rm -rf "${ARTIFACT_DIR}/install-tmp"
+          fi
 
           echo "=== Final artifact contents ==="
           ls -la "$ARTIFACT_DIR"
-          find "$ARTIFACT_DIR" | head -50
+          find "$ARTIFACT_DIR" | head -40
 
       - uses: actions/upload-artifact@v4
         with:
@@ -254,7 +280,7 @@ jobs:
           if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # macOS x86_64 (Intel)
+  # macOS x86_64 (Intel) – more powerful runner
   # --------------------------------------------------------------------------
   macos-x64:
     runs-on: macos-26-intel
@@ -290,27 +316,45 @@ jobs:
           export CXXFLAGS="$CFLAGS"
           gmake VERBOSE=1
 
-      - name: Package (official targets)
+      - name: Package
         run: |
           ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-x64"
           mkdir -p "$ARTIFACT_DIR"
 
           cd lsp
 
-          gmake package || gmake bundle || true
-          gmake install DESTDIR="${ARTIFACT_DIR}/install" || true
+          echo "=== Collecting built binaries / bundles ==="
 
-          find .build "${ARTIFACT_DIR}/install" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+          # Prefer real bundles
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             echo "Copying bundle: $d"
-            cp -a "$d" "$ARTIFACT_DIR/"
+            cp -a "$d" "$ARTIFACT_DIR/" || true
           done
 
-          find .build -type f \( -name "*vst3*.dylib" -o -name "*clap*.dylib" -o -name "*vst2*.dylib" \) \
-            -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+          # Fallback: the raw dylibs
+          find .build -type f \( \
+              -name "*vst3*.dylib" -o \
+              -name "*clap*.dylib" -o \
+              -name "*vst2*.dylib" -o \
+              -name "lsp-plugins*.dylib" \
+            \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          # Try official packaging (non-fatal)
+          gmake package || true
+          gmake install DESTDIR="${ARTIFACT_DIR}/install-tmp" || true
+
+          if [ -d "${ARTIFACT_DIR}/install-tmp" ]; then
+            find "${ARTIFACT_DIR}/install-tmp" -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
+              cp -a "$d" "$ARTIFACT_DIR/" || true
+            done
+            find "${ARTIFACT_DIR}/install-tmp" -type f -name "*.dylib" \
+              -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+            rm -rf "${ARTIFACT_DIR}/install-tmp"
+          fi
 
           echo "=== Final artifact contents ==="
           ls -la "$ARTIFACT_DIR"
-          find "$ARTIFACT_DIR" | head -50
+          find "$ARTIFACT_DIR" | head -40
 
       - uses: actions/upload-artifact@v4
         with:
