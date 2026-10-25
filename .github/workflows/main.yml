@@ -22,16 +22,15 @@ jobs:
         shell: msys2 {0}
 
     steps:
-      - name: Checkout this repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install MSYS2 + toolchain + patch
+      - name: Install MSYS2 + toolchain
         uses: msys2/setup-msys2@v2
         with:
           msystem: UCRT64
           update: true
           install: >-
-            git make patch
+            git make
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-pkg-config
             mingw-w64-ucrt-x86_64-cairo
@@ -48,148 +47,140 @@ jobs:
           make config FEATURES="${{ env.FEATURES }}"
           make fetch
 
-      - name: Apply HiDPI / DPI-awareness patch
+      - name: Apply HiDPI fix (robust)
         run: |
           cd lsp
+          SURFACE=$(find modules -path "*/lsp-ws-lib/src/main/win/WinDDSurface.cpp" | head -1)
+          DISPLAY=$(find modules -path "*/lsp-ws-lib/src/main/win/WinDisplay.cpp" | head -1)
 
-          cat > /tmp/lsp-hidpi.patch << 'EOF'
-          --- a/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
-          +++ b/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
-          @@ -43,6 +43,29 @@
-                       constexpr FLOAT DEFAULT_DESKTOP_DPI     = 96.0f;
-           
-          +            static FLOAT get_window_dpi(HWND hwnd)
-          +            {
-          +                if (hwnd)
-          +                {
-          +                    HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
-          +                    if (user32)
-          +                    {
-          +                        auto pGetDpiForWindow = reinterpret_cast<UINT (WINAPI *)(HWND)>(
-          +                            ::GetProcAddress(user32, "GetDpiForWindow"));
-          +                        if (pGetDpiForWindow)
-          +                            return FLOAT(pGetDpiForWindow(hwnd));
-          +                    }
-          +                }
-          +                HDC hdc = ::GetDC(NULL);
-          +                FLOAT dpi = hdc ? FLOAT(::GetDeviceCaps(hdc, LOGPIXELSX)) : DEFAULT_DESKTOP_DPI;
-          +                if (hdc) ::ReleaseDC(NULL, hdc);
-          +                return (dpi > 0.0f) ? dpi : DEFAULT_DESKTOP_DPI;
-          +            }
-          +
-                       //----------------------------------------------------------------------
-                       // Construction
-                       //----------------------------------------------------------------------
-          @@ -182,8 +205,10 @@
-                               prop.type                   = D2D1_RENDER_TARGET_TYPE_DEFAULT;
-                               prop.pixelFormat.format     = DXGI_FORMAT_B8G8R8A8_UNORM;
-                               prop.pixelFormat.alphaMode  = D2D1_ALPHA_MODE_PREMULTIPLIED;
-          -                    prop.dpiX                   = DEFAULT_DESKTOP_DPI;
-          -                    prop.dpiY                   = DEFAULT_DESKTOP_DPI;
-          +                    const FLOAT dpi             = get_window_dpi(pShared->hWindow);
-          +                    prop.dpiX                   = dpi;
-          +                    prop.dpiY                   = dpi;
-                               prop.usage                  = D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE;
-                               prop.minLevel               = D2D1_FEATURE_LEVEL_DEFAULT;
-           
-          --- a/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
-          +++ b/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
-          @@ -40,6 +40,36 @@
-           #include <lsp-plug.in/stdlib/string.h>
-           #include <lsp-plug.in/common/debug.h>
-           
-          +#include <shellscalingapi.h>
-          +
-          +namespace lsp
-          +{
-          +    namespace ws
-          +    {
-          +        namespace win
-          +        {
-          +            static void set_process_dpi_awareness()
-          +            {
-          +                // Prefer Per-Monitor V2 (Windows 10 1703+)
-          +                HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
-          +                if (user32)
-          +                {
-          +                    auto pSetCtx = reinterpret_cast<BOOL (WINAPI *)(DPI_AWARENESS_CONTEXT)>(
-          +                        ::GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
-          +                    if (pSetCtx)
-          +                    {
-          +                        pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-          +                        return;
-          +                    }
-          +                }
-          +
-          +                // Fallback
-          +                HMODULE shcore = ::LoadLibraryW(L"Shcore.dll");
-          +                if (shcore)
-          +                {
-          +                    auto pSet = reinterpret_cast<HRESULT (WINAPI *)(PROCESS_DPI_AWARENESS)>(
-          +                        ::GetProcAddress(shcore, "SetProcessDpiAwareness"));
-          +                    if (pSet)
-          +                        pSet(PROCESS_PER_MONITOR_DPI_AWARE);
-          +                    ::FreeLibrary(shcore);
-          +                }
-          +            }
-          +        }
-          +    }
-          +}
-           
-           //----------------------------------------------------------------------
-           // WinDisplay implementation
-          @@ -70,6 +100,8 @@
-                       //----------------------------------------------------------------------
-                       status_t WinDisplay::init(int version, const char *display)
-                       {
-          +                set_process_dpi_awareness();
-          +
-                           // Already initialized?
-                           if (bInitialized)
-                               return STATUS_OK;
-          EOF
-
-          echo "Applying patch..."
-          if patch -p1 --dry-run < /tmp/lsp-hidpi.patch > /dev/null 2>&1; then
-            patch -p1 < /tmp/lsp-hidpi.patch
-            echo "Patch applied successfully"
-          else
-            echo "Direct patch failed, trying to locate files..."
-            WS_LIB=$(find modules -type d -name "lsp-ws-lib" | head -1)
-            if [ -n "$WS_LIB" ]; then
-              echo "Found lsp-ws-lib at $WS_LIB"
-              # Apply with correct strip level relative to modules/
-              (cd modules && patch -p1 < /tmp/lsp-hidpi.patch) || {
-                # Last resort: manual sed-style replacement for the critical lines
-                echo "Falling back to sed replacements"
-                find modules/lsp-ws-lib -name "WinDDSurface.cpp" -exec sed -i \
-                  -e 's/prop\.dpiX\s*=\s*DEFAULT_DESKTOP_DPI;/const FLOAT dpi = get_window_dpi(pShared->hWindow); prop.dpiX = dpi;/' \
-                  -e 's/prop\.dpiY\s*=\s*DEFAULT_DESKTOP_DPI;/prop.dpiY = dpi;/' {} \;
-              }
-            else
-              echo "ERROR: could not find lsp-ws-lib"
-              ls -la modules || true
-              exit 1
-            fi
+          if [ -z "$SURFACE" ] || [ -z "$DISPLAY" ]; then
+            echo "ERROR: WinDDSurface.cpp / WinDisplay.cpp not found"
+            find modules -name "WinDD*.cpp" || true
+            exit 1
           fi
+
+          echo "Patching $SURFACE"
+          python3 - << 'PY' "$SURFACE"
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          helper = '''
+              static FLOAT get_window_dpi(HWND hwnd)
+              {
+                  if (hwnd)
+                  {
+                      HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+                      if (user32)
+                      {
+                          auto pGetDpiForWindow = reinterpret_cast<UINT (WINAPI *)(HWND)>(
+                              ::GetProcAddress(user32, "GetDpiForWindow"));
+                          if (pGetDpiForWindow)
+                              return FLOAT(pGetDpiForWindow(hwnd));
+                      }
+                  }
+                  HDC hdc = ::GetDC(NULL);
+                  FLOAT dpi = hdc ? FLOAT(::GetDeviceCaps(hdc, LOGPIXELSX)) : DEFAULT_DESKTOP_DPI;
+                  if (hdc) ::ReleaseDC(NULL, hdc);
+                  return (dpi > 0.0f) ? dpi : DEFAULT_DESKTOP_DPI;
+              }
+
+          '''
+
+          if "get_window_dpi" not in src:
+              src = re.sub(
+                  r'(constexpr FLOAT DEFAULT_DESKTOP_DPI\s*=\s*96\.0f\s*;)',
+                  r'\1\n' + helper,
+                  src, count=1)
+
+          src = re.sub(
+              r'prop\.dpiX\s*=\s*DEFAULT_DESKTOP_DPI\s*;',
+              'const FLOAT dpi = get_window_dpi(pShared->hWindow);\n'
+              '                    prop.dpiX                   = dpi;',
+              src, count=1)
+          src = re.sub(
+              r'prop\.dpiY\s*=\s*DEFAULT_DESKTOP_DPI\s*;',
+              'prop.dpiY                   = dpi;',
+              src, count=1)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print("WinDDSurface.cpp OK")
+          PY
+
+          echo "Patching $DISPLAY"
+          python3 - << 'PY' "$DISPLAY"
+          import sys, re
+          path = sys.argv[1]
+          with open(path, "r", encoding="utf-8", errors="replace") as f:
+              src = f.read()
+
+          if "shellscalingapi.h" not in src:
+              src = src.replace(
+                  "#include <windows.h>",
+                  "#include <windows.h>\n#include <shellscalingapi.h>")
+
+          awareness = '''
+                  // Set per-monitor DPI awareness (best effort)
+                  {
+                      HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+                      if (user32)
+                      {
+                          auto pSetCtx = reinterpret_cast<BOOL (WINAPI *)(DPI_AWARENESS_CONTEXT)>(
+                              ::GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+                          if (pSetCtx)
+                              pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                          else
+                          {
+                              HMODULE shcore = ::LoadLibraryW(L"Shcore.dll");
+                              if (shcore)
+                              {
+                                  auto pSet = reinterpret_cast<HRESULT (WINAPI *)(PROCESS_DPI_AWARENESS)>(
+                                      ::GetProcAddress(shcore, "SetProcessDpiAwareness"));
+                                  if (pSet)
+                                      pSet(PROCESS_PER_MONITOR_DPI_AWARE);
+                                  ::FreeLibrary(shcore);
+                              }
+                          }
+                      }
+                  }
+
+          '''
+
+          if "SetProcessDpiAwarenessContext" not in src and "SetProcessDpiAwareness" not in src:
+              src = re.sub(
+                  r'(status_t WinDisplay::init\(int argc, const char \*\*argv\)\s*\{\s*)',
+                  r'\1' + awareness,
+                  src, count=1)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(src)
+          print("WinDisplay.cpp OK")
+          PY
+
+          echo "=== Verification ==="
+          grep -n "get_window_dpi\|prop.dpiX\|SetProcessDpiAwareness" "$SURFACE" "$DISPLAY" || true
 
       - name: Build
         run: |
           cd lsp
           make VERBOSE=1
 
-      - name: Package artifacts
+      - name: Package
         run: |
           cd lsp
           mkdir -p ../artifacts/windows-x64
-          find .build modules -type f \( -name "*.dll" -o -name "*.vst3" -o -name "*.clap" \) \
-            2>/dev/null | while read f; do
-              cp --parents "$f" ../artifacts/windows-x64/ 2>/dev/null || cp "$f" ../artifacts/windows-x64/
-            done || true
-          find . -maxdepth 4 -type d \( -name "bin" -o -name "lib" -o -name "vst3" \) 2>/dev/null | head -10
+          find .build -type f \( -name "*.dll" -o -name "*.exe" \) \
+            -exec cp --parents {} ../artifacts/windows-x64/ \; 2>/dev/null || true
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" \) | while read d; do
+            dest="../artifacts/windows-x64/$(dirname "$d")"
+            mkdir -p "$dest"
+            cp -a "$d" "$dest/"
+          done
+          find ../artifacts/windows-x64 | head -40
 
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-windows-x64
           path: artifacts/windows-x64
@@ -201,107 +192,101 @@ jobs:
   macos-arm64:
     runs-on: macos-latest
     steps:
-      - name: Checkout this repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           brew update
           brew install make pkg-config cairo freetype libsndfile libpng
 
-      - name: Fetch official LSP sources
+      - name: Fetch
         run: |
           git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
           cd lsp
           gmake config FEATURES="${{ env.FEATURES }}"
           gmake fetch
 
-      - name: Apply macOS scale hardening (optional safety)
-        run: |
-          cd lsp
-          # The official code already contains the lltwist display_pixel_scale() fix.
-          # We only add a small comment + ensure the function is present.
-          UI_WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
-          if [ -n "$UI_WRAPPER" ]; then
-            echo "Found ui_wrapper.h at $UI_WRAPPER"
-            # Nothing critical to change; the existing conversion is already correct.
-            # Just touch the file so the build system notices it if needed.
-            touch "$UI_WRAPPER"
-          else
-            echo "ui_wrapper.h not found (will rely on upstream fix)"
-            find modules -name "ui_wrapper.h" || true
-          fi
-
       - name: Build
         run: |
           cd lsp
           gmake VERBOSE=1
 
-      - name: Package artifacts
+      - name: Package
         run: |
           cd lsp
           mkdir -p ../artifacts/macos-arm64
-          find .build modules -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
-            2>/dev/null | while read f; do
-              cp --parents "$f" ../artifacts/macos-arm64/ 2>/dev/null || cp "$f" ../artifacts/macos-arm64/
-            done || true
+          find .build -type f \( -name "*.dylib" -o -name "*.so" \) \
+            -exec cp --parents {} ../artifacts/macos-arm64/ \; 2>/dev/null || true
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
+            dest="../artifacts/macos-arm64/$(dirname "$d")"
+            mkdir -p "$dest"
+            cp -a "$d" "$dest/"
+          done
+          echo "=== Bundles ==="
+          find ../artifacts/macos-arm64 -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \)
 
-      - name: Upload macOS arm64 artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-macos-arm64
           path: artifacts/macos-arm64
           if-no-files-found: warn
 
   # --------------------------------------------------------------------------
-  # macOS x86_64 (Intel)
+  # macOS x86_64 (Intel) – disable broken AVX2/AVX-512 paths
   # --------------------------------------------------------------------------
   macos-x64:
     runs-on: macos-15-intel
     steps:
-      - name: Checkout this repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
           brew update
           brew install make pkg-config cairo freetype libsndfile libpng
 
-      - name: Fetch official LSP sources
+      - name: Show environment
+        run: |
+          uname -a
+          arch
+          clang --version || true
+          gmake --version
+
+      - name: Fetch
         run: |
           git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
           cd lsp
-          gmake config FEATURES="${{ env.FEATURES }}"
+          # Force x86_64 and explicitly disable the instruction sets that
+          # produce non-relocatable expressions for the macOS assembler.
+          gmake config \
+            FEATURES="${{ env.FEATURES }}" \
+            ARCHITECTURE=x86_64 \
+            CFLAGS="-mno-avx2 -mno-avx512f -mno-avx512cd -mno-avx512vl -mno-avx512bw -mno-avx512dq" \
+            CXXFLAGS="-mno-avx2 -mno-avx512f -mno-avx512cd -mno-avx512vl -mno-avx512bw -mno-avx512dq"
           gmake fetch
-
-      - name: Apply macOS scale hardening (optional safety)
-        run: |
-          cd lsp
-          UI_WRAPPER=$(find modules -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" | head -1)
-          if [ -n "$UI_WRAPPER" ]; then
-            echo "Found ui_wrapper.h at $UI_WRAPPER"
-            touch "$UI_WRAPPER"
-          else
-            echo "ui_wrapper.h not found (will rely on upstream fix)"
-            find modules -name "ui_wrapper.h" || true
-          fi
 
       - name: Build
         run: |
           cd lsp
+          # Re-apply the same flags so every sub-make inherits them
+          export CFLAGS="-mno-avx2 -mno-avx512f -mno-avx512cd -mno-avx512vl -mno-avx512bw -mno-avx512dq"
+          export CXXFLAGS="$CFLAGS"
           gmake VERBOSE=1
 
-      - name: Package artifacts
+      - name: Package
         run: |
           cd lsp
           mkdir -p ../artifacts/macos-x64
-          find .build modules -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
-            2>/dev/null | while read f; do
-              cp --parents "$f" ../artifacts/macos-x64/ 2>/dev/null || cp "$f" ../artifacts/macos-x64/
-            done || true
+          find .build -type f \( -name "*.dylib" -o -name "*.so" \) \
+            -exec cp --parents {} ../artifacts/macos-x64/ \; 2>/dev/null || true
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
+            dest="../artifacts/macos-x64/$(dirname "$d")"
+            mkdir -p "$dest"
+            cp -a "$d" "$dest/"
+          done
+          echo "=== Bundles ==="
+          find ../artifacts/macos-x64 -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \)
 
-      - name: Upload macOS x64 artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-macos-x64
           path: artifacts/macos-x64
