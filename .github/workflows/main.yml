@@ -1,0 +1,305 @@
+name: LSP Plugins (Windows + macOS) with HiDPI fix
+
+on:
+  push:
+    branches: [master, main, devel]
+  pull_request:
+    branches: [master, main, devel]
+  workflow_dispatch:
+
+env:
+  # Plugin formats we care about for Windows / macOS
+  FEATURES: "ui vst2 vst3 clap"
+  # Make the build a bit quieter but still informative
+  MAKEFLAGS: "-j4"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # Windows x86_64
+  # --------------------------------------------------------------------------
+  windows-x64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Install MSYS2 + toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git make mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-cairo
+            mingw-w64-ucrt-x86_64-freetype
+            mingw-w64-ucrt-x86_64-libsndfile
+            mingw-w64-ucrt-x86_64-libpng
+            mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-python
+
+      - name: Fetch official LSP sources
+        shell: msys2 {0}
+        run: |
+          git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
+          cd lsp
+          make config FEATURES="${{ env.FEATURES }}"
+          make fetch
+
+      - name: Apply HiDPI / DPI-awareness patch
+        shell: msys2 {0}
+        run: |
+          cd lsp
+          cat > /tmp/lsp-hidpi.patch << 'PATCH'
+          --- a/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
+          +++ b/modules/lsp-ws-lib/src/main/win/WinDDSurface.cpp
+          @@ -43,6 +43,28 @@
+                       constexpr FLOAT DEFAULT_DESKTOP_DPI     = 96.0f;
+           
+          +            static FLOAT get_window_dpi(HWND hwnd)
+          +            {
+          +                if (hwnd)
+          +                {
+          +                    HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+          +                    if (user32)
+          +                    {
+          +                        auto pGetDpiForWindow = reinterpret_cast<UINT (WINAPI *)(HWND)>(
+          +                            ::GetProcAddress(user32, "GetDpiForWindow"));
+          +                        if (pGetDpiForWindow)
+          +                            return FLOAT(pGetDpiForWindow(hwnd));
+          +                    }
+          +                }
+          +                HDC hdc = ::GetDC(NULL);
+          +                FLOAT dpi = hdc ? FLOAT(::GetDeviceCaps(hdc, LOGPIXELSX)) : DEFAULT_DESKTOP_DPI;
+          +                if (hdc) ::ReleaseDC(NULL, hdc);
+          +                return (dpi > 0.0f) ? dpi : DEFAULT_DESKTOP_DPI;
+          +            }
+          +
+                       //----------------------------------------------------------------------
+                       // Construction
+                       //----------------------------------------------------------------------
+          @@ -182,8 +204,10 @@
+                               prop.type                   = D2D1_RENDER_TARGET_TYPE_DEFAULT;
+                               prop.pixelFormat.format     = DXGI_FORMAT_B8G8R8A8_UNORM;
+                               prop.pixelFormat.alphaMode  = D2D1_ALPHA_MODE_PREMULTIPLIED;
+          -                    prop.dpiX                   = DEFAULT_DESKTOP_DPI;
+          -                    prop.dpiY                   = DEFAULT_DESKTOP_DPI;
+          +                    const FLOAT dpi             = get_window_dpi(pShared->hWindow);
+          +                    prop.dpiX                   = dpi;
+          +                    prop.dpiY                   = dpi;
+                               prop.usage                  = D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE;
+                               prop.minLevel               = D2D1_FEATURE_LEVEL_DEFAULT;
+           
+          --- a/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
+          +++ b/modules/lsp-ws-lib/src/main/win/WinDisplay.cpp
+          @@ -40,6 +40,35 @@
+           #include <lsp-plug.in/stdlib/string.h>
+           #include <lsp-plug.in/common/debug.h>
+           
+          +#include <shellscalingapi.h>
+          +
+          +namespace lsp
+          +{
+          +    namespace ws
+          +    {
+          +        namespace win
+          +        {
+          +            static void set_process_dpi_awareness()
+          +            {
+          +                // Prefer Per-Monitor V2 (Windows 10 1703+)
+          +                HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+          +                if (user32)
+          +                {
+          +                    auto pSetCtx = reinterpret_cast<BOOL (WINAPI *)(DPI_AWARENESS_CONTEXT)>(
+          +                        ::GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+          +                    if (pSetCtx)
+          +                    {
+          +                        pSetCtx(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+          +                        return;
+          +                    }
+          +                }
+          +
+          +                // Fallback to older API
+          +                HMODULE shcore = ::LoadLibraryW(L"Shcore.dll");
+          +                if (shcore)
+          +                {
+          +                    auto pSet = reinterpret_cast<HRESULT (WINAPI *)(PROCESS_DPI_AWARENESS)>(
+          +                        ::GetProcAddress(shcore, "SetProcessDpiAwareness"));
+          +                    if (pSet)
+          +                        pSet(PROCESS_PER_MONITOR_DPI_AWARE);
+          +                    ::FreeLibrary(shcore);
+          +                }
+          +            }
+          +        }
+          +    }
+          +}
+           
+           //----------------------------------------------------------------------
+           // WinDisplay implementation
+          @@ -70,6 +99,8 @@
+                       //----------------------------------------------------------------------
+                       status_t WinDisplay::init(int version, const char *display)
+                       {
+          +                set_process_dpi_awareness();
+          +
+                           // Already initialized?
+                           if (bInitialized)
+                               return STATUS_OK;
+          PATCH
+
+          # The modules live under .build after "make fetch"
+          patch -p1 -d .build < /tmp/lsp-hidpi.patch || {
+            echo "Trying alternative path..."
+            find .build -type d -name "lsp-ws-lib" | head -1 | while read d; do
+              patch -p1 -d "$d/../.." < /tmp/lsp-hidpi.patch || true
+            done
+          }
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cd lsp
+          make VERBOSE=1
+
+      - name: Package artifacts
+        shell: msys2 {0}
+        run: |
+          cd lsp
+          mkdir -p ../artifacts/windows-x64
+          # Collect the usual plugin locations
+          find .build -type f \( -name "*.dll" -o -name "*.vst3" -o -name "*.clap" \) \
+            -exec cp --parents {} ../artifacts/windows-x64/ \; || true
+          # Also grab any installable packages if the Makefile produced them
+          find . -maxdepth 3 -type d -name "bin" -o -name "lib" | head -5
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-plugins-windows-x64
+          path: artifacts/windows-x64
+          if-no-files-found: warn
+
+  # --------------------------------------------------------------------------
+  # macOS arm64 (Apple Silicon)
+  # --------------------------------------------------------------------------
+  macos-arm64:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install make pkg-config cairo freetype libsndfile libpng
+
+      - name: Fetch official LSP sources
+        run: |
+          git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
+          cd lsp
+          gmake config FEATURES="${{ env.FEATURES }}"
+          gmake fetch
+
+      - name: Apply macOS content-scale hardening
+        run: |
+          cd lsp
+          # Small extra safety for the already-present display_pixel_scale() logic
+          # and ensure Cairo surfaces respect backingScaleFactor more reliably.
+          cat > /tmp/macos-scale.patch << 'PATCH'
+          --- a/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
+          +++ b/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
+          @@ -820,6 +820,8 @@
+                   static double display_pixel_scale()
+                   {
+                       // On macOS hosts report the factor in PHYSICAL pixels per point —
+          +            // Keep the existing conversion that turns a host-supplied physical
+          +            // scale into a logical zoom factor (the lltwist fix).
+                       #if defined(PLATFORM_MACOSX)
+                           CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+                           if (mode == NULL)
+          PATCH
+          # Apply only if the file exists (it does after fetch)
+          find .build -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" \
+            -exec patch -p1 -N {} < /tmp/macos-scale.patch \; || true
+
+      - name: Build
+        run: |
+          cd lsp
+          gmake VERBOSE=1
+
+      - name: Package artifacts
+        run: |
+          cd lsp
+          mkdir -p ../artifacts/macos-arm64
+          find .build -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
+            -exec cp --parents {} ../artifacts/macos-arm64/ \; || true
+
+      - name: Upload macOS arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-plugins-macos-arm64
+          path: artifacts/macos-arm64
+          if-no-files-found: warn
+
+  # --------------------------------------------------------------------------
+  # macOS x86_64 (Intel)
+  # --------------------------------------------------------------------------
+  macos-x64:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout this repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install make pkg-config cairo freetype libsndfile libpng
+
+      - name: Fetch official LSP sources
+        run: |
+          git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
+          cd lsp
+          gmake config FEATURES="${{ env.FEATURES }}"
+          gmake fetch
+
+      - name: Apply macOS content-scale hardening
+        run: |
+          cd lsp
+          cat > /tmp/macos-scale.patch << 'PATCH'
+          --- a/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
+          +++ b/modules/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h
+          @@ -820,6 +820,8 @@
+                   static double display_pixel_scale()
+                   {
+                       // On macOS hosts report the factor in PHYSICAL pixels per point —
+          +            // Keep the existing conversion that turns a host-supplied physical
+          +            // scale into a logical zoom factor (the lltwist fix).
+                       #if defined(PLATFORM_MACOSX)
+                           CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+                           if (mode == NULL)
+          PATCH
+          find .build -path "*/lsp-plugin-fw/include/lsp-plug.in/plug-fw/wrap/vst3/impl/ui_wrapper.h" \
+            -exec patch -p1 -N {} < /tmp/macos-scale.patch \; || true
+
+      - name: Build
+        run: |
+          cd lsp
+          gmake VERBOSE=1
+
+      - name: Package artifacts
+        run: |
+          cd lsp
+          mkdir -p ../artifacts/macos-x64
+          find .build -type f \( -name "*.dylib" -o -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) \
+            -exec cp --parents {} ../artifacts/macos-x64/ \; || true
+
+      - name: Upload macOS x64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lsp-plugins-macos-x64
+          path: artifacts/macos-x64
+          if-no-files-found: warn
