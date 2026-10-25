@@ -169,22 +169,32 @@ jobs:
 
       - name: Package
         run: |
+          ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/windows-x64"
+          mkdir -p "$ARTIFACT_DIR"
+
           cd lsp
-          mkdir -p ../artifacts/windows-x64
-          find .build -type f \( -name "*.dll" -o -name "*.exe" \) \
-            -exec cp --parents {} ../artifacts/windows-x64/ \; 2>/dev/null || true
-          find .build -type d \( -name "*.vst3" -o -name "*.clap" \) | while read d; do
-            dest="../artifacts/windows-x64/$(dirname "$d")"
-            mkdir -p "$dest"
-            cp -a "$d" "$dest/"
-          done
-          find ../artifacts/windows-x64 | head -40
+
+          echo "=== Looking for plugin binaries ==="
+          find .build -type f \( -name "*.dll" -o -name "*.exe" \) | head -30
+
+          find .build -type f \( \
+              -name "lsp-plugins-vst2.dll" -o \
+              -name "lsp-plugins-vst3.dll" -o \
+              -name "lsp-plugins-clap.dll" -o \
+              -name "*.dll" \
+            \) -exec cp -v {} "$ARTIFACT_DIR/" \;
+
+          find .build -type f -name "*.exe" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          echo "=== Final artifact contents ==="
+          ls -la "$ARTIFACT_DIR" || true
+          find "$ARTIFACT_DIR" | head -40
 
       - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-windows-x64
           path: artifacts/windows-x64
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # --------------------------------------------------------------------------
   # macOS arm64 (Apple Silicon)
@@ -213,29 +223,38 @@ jobs:
 
       - name: Package
         run: |
+          ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-arm64"
+          mkdir -p "$ARTIFACT_DIR"
+
           cd lsp
-          mkdir -p ../artifacts/macos-arm64
-          find .build -type f \( -name "*.dylib" -o -name "*.so" \) \
-            -exec cp --parents {} ../artifacts/macos-arm64/ \; 2>/dev/null || true
+
+          echo "=== Looking for plugin bundles / dylibs ==="
+          find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) || true
+          find .build -type f \( -name "*.dylib" -o -name "*.so" \) | head -20
+
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
-            dest="../artifacts/macos-arm64/$(dirname "$d")"
-            mkdir -p "$dest"
-            cp -a "$d" "$dest/"
+            echo "Copying bundle $d"
+            cp -a "$d" "$ARTIFACT_DIR/"
           done
-          echo "=== Bundles ==="
-          find ../artifacts/macos-arm64 -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \)
+
+          find .build -type f \( -name "*vst3*.dylib" -o -name "*clap*.dylib" -o -name "*vst2*.dylib" \) \
+            -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          echo "=== Final artifact contents ==="
+          ls -la "$ARTIFACT_DIR" || true
+          find "$ARTIFACT_DIR" | head -40
 
       - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-macos-arm64
           path: artifacts/macos-arm64
-          if-no-files-found: warn
+          if-no-files-found: error
 
   # --------------------------------------------------------------------------
-  # macOS x86_64 (Intel) – disable broken AVX2/AVX-512 paths
+  # macOS x86_64 (Intel) – more powerful runner
   # --------------------------------------------------------------------------
   macos-x64:
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -249,14 +268,11 @@ jobs:
           uname -a
           arch
           clang --version || true
-          gmake --version
 
       - name: Fetch
         run: |
           git clone --depth 1 https://github.com/lsp-plugins/lsp-plugins.git lsp
           cd lsp
-          # Force x86_64 and explicitly disable the instruction sets that
-          # produce non-relocatable expressions for the macOS assembler.
           gmake config \
             FEATURES="${{ env.FEATURES }}" \
             ARCHITECTURE=x86_64 \
@@ -267,27 +283,31 @@ jobs:
       - name: Build
         run: |
           cd lsp
-          # Re-apply the same flags so every sub-make inherits them
           export CFLAGS="-mno-avx2 -mno-avx512f -mno-avx512cd -mno-avx512vl -mno-avx512bw -mno-avx512dq"
           export CXXFLAGS="$CFLAGS"
           gmake VERBOSE=1
 
       - name: Package
         run: |
+          ARTIFACT_DIR="${GITHUB_WORKSPACE}/artifacts/macos-x64"
+          mkdir -p "$ARTIFACT_DIR"
+
           cd lsp
-          mkdir -p ../artifacts/macos-x64
-          find .build -type f \( -name "*.dylib" -o -name "*.so" \) \
-            -exec cp --parents {} ../artifacts/macos-x64/ \; 2>/dev/null || true
+
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) | while read d; do
-            dest="../artifacts/macos-x64/$(dirname "$d")"
-            mkdir -p "$dest"
-            cp -a "$d" "$dest/"
+            echo "Copying bundle $d"
+            cp -a "$d" "$ARTIFACT_DIR/"
           done
-          echo "=== Bundles ==="
-          find ../artifacts/macos-x64 -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \)
+
+          find .build -type f \( -name "*vst3*.dylib" -o -name "*clap*.dylib" -o -name "*vst2*.dylib" \) \
+            -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          echo "=== Final artifact contents ==="
+          ls -la "$ARTIFACT_DIR" || true
+          find "$ARTIFACT_DIR" | head -40
 
       - uses: actions/upload-artifact@v4
         with:
           name: lsp-plugins-macos-x64
           path: artifacts/macos-x64
-          if-no-files-found: warn
+          if-no-files-found: error
