@@ -181,36 +181,47 @@ jobs:
           find INSTALL -type f 2>/dev/null | head -80 || true
 
           if [ -d "INSTALL" ]; then
-            # VST2
-            if [ -d "INSTALL/lib/vst" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST2"
-              cp -a INSTALL/lib/vst/* "$ARTIFACT_DIR/VST2/" 2>/dev/null || true
-            fi
+            [ -d "INSTALL/lib/vst"  ] && mkdir -p "$ARTIFACT_DIR/VST2"  && cp -a INSTALL/lib/vst/*  "$ARTIFACT_DIR/VST2/"  2>/dev/null || true
+            [ -d "INSTALL/lib/vst3" ] && mkdir -p "$ARTIFACT_DIR/VST3"  && cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/"  2>/dev/null || true
+            [ -d "INSTALL/lib/clap" ] && mkdir -p "$ARTIFACT_DIR/CLAP"  && cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/"  2>/dev/null || true
 
-            # VST3
-            if [ -d "INSTALL/lib/vst3" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST3"
-              cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/" 2>/dev/null || true
-            fi
-
-            # CLAP
-            if [ -d "INSTALL/lib/clap" ]; then
-              mkdir -p "$ARTIFACT_DIR/CLAP"
-              cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/" 2>/dev/null || true
-            fi
-
-            # Supporting libraries (critical for UI)
             find INSTALL -name "lsp-r3d-wgl*.dll" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
             find INSTALL -name "*.dll" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
           fi
 
-          # Fallback: also grab the raw build products
+          # Fallback: raw build products
           find .build -type f \( \
               -name "lsp-plugins-vst2.dll" -o \
               -name "lsp-plugins-vst3.dll" -o \
               -name "lsp-plugins-clap.dll" -o \
               -name "lsp-r3d-wgl*.dll" \
             \) -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
+
+          # ---------------------------------------------------------------
+          # Critical: ship the MinGW / UCRT runtime DLLs the plugins need
+          # ---------------------------------------------------------------
+          echo "=== Copying MinGW runtime DLLs ==="
+          for dll in \
+              libwinpthread-1.dll \
+              libgcc_s_seh-1.dll \
+              libstdc++-6.dll \
+              libssp-0.dll
+          do
+            for candidate in \
+                /ucrt64/bin/$dll \
+                /mingw64/bin/$dll \
+                /usr/bin/$dll
+            do
+              if [ -f "$candidate" ]; then
+                echo "Found $candidate"
+                cp -v "$candidate" "$ARTIFACT_DIR/"
+                [ -d "$ARTIFACT_DIR/VST2" ] && cp -v "$candidate" "$ARTIFACT_DIR/VST2/" || true
+                [ -d "$ARTIFACT_DIR/VST3" ] && cp -v "$candidate" "$ARTIFACT_DIR/VST3/" || true
+                [ -d "$ARTIFACT_DIR/CLAP" ] && cp -v "$candidate" "$ARTIFACT_DIR/CLAP/" || true
+                break
+              fi
+            done
+          done
 
           echo "=== Final artifact contents ==="
           find "$ARTIFACT_DIR" | sort
@@ -253,39 +264,23 @@ jobs:
 
           cd lsp
 
-          # Official install creates the proper layout under INSTALL/
           gmake install PREFIX=./INSTALL || true
 
           echo "=== Contents of INSTALL tree ==="
           find INSTALL -type f 2>/dev/null | head -80 || true
 
           if [ -d "INSTALL" ]; then
-            # VST2
-            if [ -d "INSTALL/lib/vst" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST2"
-              cp -a INSTALL/lib/vst/* "$ARTIFACT_DIR/VST2/" 2>/dev/null || true
-            fi
+            [ -d "INSTALL/lib/vst"  ] && mkdir -p "$ARTIFACT_DIR/VST2"  && cp -a INSTALL/lib/vst/*  "$ARTIFACT_DIR/VST2/"  2>/dev/null || true
+            [ -d "INSTALL/lib/vst3" ] && mkdir -p "$ARTIFACT_DIR/VST3"  && cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/"  2>/dev/null || true
+            [ -d "INSTALL/lib/clap" ] && mkdir -p "$ARTIFACT_DIR/CLAP"  && cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/"  2>/dev/null || true
 
-            # VST3
-            if [ -d "INSTALL/lib/vst3" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST3"
-              cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/" 2>/dev/null || true
-            fi
-
-            # CLAP
-            if [ -d "INSTALL/lib/clap" ]; then
-              mkdir -p "$ARTIFACT_DIR/CLAP"
-              cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/" 2>/dev/null || true
-            fi
-
-            # Any other libraries / resources
             find INSTALL -name "*.dylib" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
             find INSTALL -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
               cp -a "$d" "$ARTIFACT_DIR/" || true
             done
           fi
 
-          # Fallback: raw build products
+          # Fallback
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             cp -a "$d" "$ARTIFACT_DIR/" || true
           done
@@ -349,39 +344,23 @@ jobs:
 
           cd lsp
 
-          # Official install creates the proper layout under INSTALL/
           gmake install PREFIX=./INSTALL || true
 
           echo "=== Contents of INSTALL tree ==="
           find INSTALL -type f 2>/dev/null | head -80 || true
 
           if [ -d "INSTALL" ]; then
-            # VST2
-            if [ -d "INSTALL/lib/vst" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST2"
-              cp -a INSTALL/lib/vst/* "$ARTIFACT_DIR/VST2/" 2>/dev/null || true
-            fi
+            [ -d "INSTALL/lib/vst"  ] && mkdir -p "$ARTIFACT_DIR/VST2"  && cp -a INSTALL/lib/vst/*  "$ARTIFACT_DIR/VST2/"  2>/dev/null || true
+            [ -d "INSTALL/lib/vst3" ] && mkdir -p "$ARTIFACT_DIR/VST3"  && cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/"  2>/dev/null || true
+            [ -d "INSTALL/lib/clap" ] && mkdir -p "$ARTIFACT_DIR/CLAP"  && cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/"  2>/dev/null || true
 
-            # VST3
-            if [ -d "INSTALL/lib/vst3" ]; then
-              mkdir -p "$ARTIFACT_DIR/VST3"
-              cp -a INSTALL/lib/vst3/* "$ARTIFACT_DIR/VST3/" 2>/dev/null || true
-            fi
-
-            # CLAP
-            if [ -d "INSTALL/lib/clap" ]; then
-              mkdir -p "$ARTIFACT_DIR/CLAP"
-              cp -a INSTALL/lib/clap/* "$ARTIFACT_DIR/CLAP/" 2>/dev/null || true
-            fi
-
-            # Any other libraries / resources
             find INSTALL -name "*.dylib" -exec cp -v {} "$ARTIFACT_DIR/" \; 2>/dev/null || true
             find INSTALL -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
               cp -a "$d" "$ARTIFACT_DIR/" || true
             done
           fi
 
-          # Fallback: raw build products
+          # Fallback
           find .build -type d \( -name "*.vst3" -o -name "*.clap" -o -name "*.component" \) 2>/dev/null | while read d; do
             cp -a "$d" "$ARTIFACT_DIR/" || true
           done
